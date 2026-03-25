@@ -1,0 +1,259 @@
+<script>
+(function(){
+  try {
+    if (window.__wd_recordExpense_wrapper_installed) {
+      console.info('[hotfix] recordExpense wrapper already installed');
+      return;
+    }
+    console.info('[hotfix] installing recordExpense wrapper');
+
+    // dedupe store
+    window.__wd_record_dedupe = window.__wd_record_dedupe || { lastCalls: {}, ttl: 3000 };
+    function _dedupeKey(itemId, amount, desc) {
+      return String(itemId||'') + '|' + String(amount||'') + '|' + String((desc||'').slice(0,50));
+    }
+    function isDuplicate(itemId, amount, desc) {
+      try {
+        var k = _dedupeKey(itemId, amount, desc);
+        var now = Date.now();
+        var rec = window.__wd_record_dedupe.lastCalls[k];
+        if (rec && (now - rec) < window.__wd_record_dedupe.ttl) return true;
+        window.__wd_record_dedupe.lastCalls[k] = now;
+        // occasional cleanup
+        Object.keys(window.__wd_record_dedupe.lastCalls).forEach(function(x){
+          if (Date.now() - window.__wd_record_dedupe.lastCalls[x] > 60000) delete window.__wd_record_dedupe.lastCalls[x];
+        });
+        return false;
+      } catch(e){ return false; }
+    }
+
+    // normalize common date formats -> YYYY-MM-DD
+    function normalizeDateForServer(d) {
+      try {
+        if (!d) return '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+        var m = String(d).trim();
+        var dm = m.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+        if (dm) {
+          var day = ('0' + dm[1]).slice(-2), month = ('0' + dm[2]).slice(-2), yr = dm[3];
+          if (yr.length === 2) { yr = '20' + yr; }
+          return yr + '-' + month + '-' + day;
+        }
+        var dt = new Date(m);
+        if (!isNaN(dt.getTime())) {
+          var y = dt.getFullYear();
+          var mm = ('0' + (dt.getMonth()+1)).slice(-2);
+          var dd = ('0' + dt.getDate()).slice(-2);
+          return y + '-' + mm + '-' + dd;
+        }
+        return '';
+      } catch(e){ return ''; }
+    }
+
+    // small normalizer (reuse clientNormalizeItemId if available)
+    function normalizeIdClientSide(id) {
+      try {
+        if (typeof window.clientNormalizeItemId === 'function') return window.clientNormalizeItemId(id);
+        if (id === null || id === undefined) return '';
+        var s = String(id).trim();
+        return s.replace(/\u00A0/g,' ').replace(/[\s\-_]+/g,' ').trim();
+      } catch(e){ return String(id || ''); }
+    }
+
+    // helper: is support id? checks configured default prefix or SP prefix
+    function isSupportId(id) {
+      try {
+        var v = String(id || '').toUpperCase().trim();
+        if (!v) return false;
+        // check configured default prefix first
+        if (typeof window !== 'undefined' && window._supportDefaultPrefix) {
+          var pref = String(window._supportDefaultPrefix).toUpperCase();
+          if (v.indexOf(pref + '-') === 0 || v.indexOf(pref) === 0) return true;
+        }
+        // fallback: common support prefix pattern (SP####)
+        if (/^SP\d{1,}/i.test(v) || /^SP\d+\-\d+/i.test(v)) return true;
+        return false;
+      } catch(e){ return false; }
+    }
+
+    // wrapper that normalizes and dedupes before calling server
+    window.recordExpense = window.recordExpense || function(itemId, amount, description, expenseDate) {
+      try {
+        // prefer hidden field
+        try {
+          var hid = document.querySelector('#expenseItemId');
+          if (hid && hid.value) itemId = hid.value;
+        } catch(e){}
+
+        // normalize element -> id
+        if (itemId && typeof itemId === 'object' && itemId.nodeType === 1) {
+          try {
+            itemId = (itemId.getAttribute && (itemId.getAttribute('data-id') || itemId.getAttribute('data-item-id'))) ||
+                     (itemId.dataset && (itemId.dataset.id || itemId.dataset.itemId || itemId.dataset.item)) ||
+                     itemId.id || '';
+          } catch(e){ itemId = ''; }
+        }
+        itemId = (itemId===null|| itemId===undefined) ? '' : String(itemId);
+
+        // normalize the ID on client before dedupe/send
+        var normId = normalizeIdClientSide(itemId);
+
+        var normDate = normalizeDateForServer(expenseDate || (document.querySelector('#expenseDate') && document.querySelector('#expenseDate').value) || '');
+
+        if (isDuplicate(normId, amount, description)) {
+          console.warn('[hotfix] duplicate recordExpense suppressed', { itemId:normId, amount:amount, description:description, date:normDate });
+          return;
+        }
+
+        // choose server method: support vs main
+        var useSupportApi = isSupportId(normId) || (typeof window !== 'undefined' && window._supportMode === true);
+        console.info('[hotfix] recordExpense calling server', { originalItemId: itemId, normalizedItemId: normId, amount: amount, desc: description, date: normDate, useSupportApi: useSupportApi });
+
+        var callPromise = null;
+
+        if (useSupportApi) {
+          // prefer rpc wrapper for support endpoint
+          if (typeof window.rpcRecordSupportExpense === 'function') {
+            try {
+              callPromise = Promise.resolve(window.rpcRecordSupportExpense(normId, amount, description, normDate, 0));
+            } catch(e) { console.warn('[hotfix] rpcRecordSupportExpense threw', e); callPromise = null; }
+          }
+          // fallback to direct google.script.run.recordSupportExpenseSupport
+          if (!callPromise && window.google && google.script && google.script.run && typeof google.script.run.recordSupportExpenseSupport === 'function') {
+            callPromise = new Promise(function(resolve,reject){
+              try {
+                google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).recordSupportExpenseSupport(normId, amount, description, normDate, 0);
+              } catch(err){ reject(err); }
+            });
+          }
+          if (!callPromise) {
+            console.error('[hotfix] No support RPC available for', normId);
+            if (typeof window.showCustomAlert === 'function') {
+              try { window.showCustomAlert('❌ ไม่สำเร็จ', 'ไม่สามารถบันทึกแบบ Support ได้ (ไม่พบ RPC)', 'error'); } catch(e){}
+            }
+            return;
+          }
+        } else {
+          // main flow: prefer rpcRecordExpense then google.script.run.recordExpense
+          if (typeof window.rpcRecordExpense === 'function') {
+            try {
+              callPromise = Promise.resolve(window.rpcRecordExpense(normId, amount, description, normDate));
+            } catch(e) { console.warn('[hotfix] rpcRecordExpense threw', e); callPromise = null; }
+          }
+          if (!callPromise && window.google && google.script && google.script.run && typeof google.script.run.recordExpense === 'function') {
+            callPromise = new Promise(function(resolve,reject){
+              try {
+                google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).recordExpense(normId, amount, description, normDate);
+              } catch(err){ reject(err); }
+            });
+          }
+          if (!callPromise) {
+            console.error('[hotfix] No main RPC available for', normId);
+            if (typeof window.showCustomAlert === 'function') {
+              try { window.showCustomAlert('❌ ไม่สำเร็จ', 'ไม่สามารถบันทึกได้ (ไม่พบ RPC)', 'error'); } catch(e){}
+            }
+            return;
+          }
+        }
+
+        // handle result
+        callPromise.then(function(res){
+          try {
+            console.info('[hotfix] recordExpense result', res);
+            if (res && res.success) {
+              // success behavior: refresh relevant lists / UI
+              try { if (useSupportApi) { if (typeof window.loadSupportItemsList === 'function') window.loadSupportItemsList(); } } catch(e){}
+              try { if (!useSupportApi && typeof window.applyFilters === 'function') window.applyFilters(); } catch(e){}
+              try { if (!useSupportApi && typeof window.loadData === 'function') window.loadData(); } catch(e){}
+              try { if (typeof window.closeModal === 'function') window.closeModal('expenseModal'); else { var em = document.getElementById('expenseModal'); if (em) em.classList.remove('active'); } } catch(e){}
+            } else {
+              // server returned success:false — show message
+              try { console.warn('[hotfix] server rejected recordExpense', res); } catch(e){}
+              var msg = (res && res.message) ? res.message : 'ไม่สามารถบันทึกรายการได้';
+              if (typeof window.showCustomAlert === 'function') {
+                try { window.showCustomAlert('❌ ไม่สำเร็จ', msg, 'error'); } catch(e){}
+              } else {
+                console.warn('customAlert elements missing:', msg);
+              }
+            }
+          } catch(err){
+            console.error('[hotfix] recordExpense success handler error', err);
+          }
+        }).catch(function(err){
+          console.error('[hotfix] recordExpense failed', err);
+          try { if (typeof window.showCustomAlert === 'function') window.showCustomAlert('❌ ข้อผิดพลาด', String(err), 'error'); } catch(e){}
+        });
+
+      } catch(err){ console.error('[hotfix] wrapper error', err); }
+    };
+
+    // click proxy to prevent double invocation (capture phase)
+    if (!window.__wd_save_click_proxy_installed) {
+      document.addEventListener('click', function(ev){
+        try {
+          // SKIP any clicks that occur inside the Support UI container to avoid intercepting support-specific saves.
+          try {
+            var scid = window._supportBudgetContainerId || 'supportBudgetContainer';
+            if (scid) {
+              var sc = document.getElementById(scid);
+              if (sc && sc.contains(ev.target)) {
+                // allow support inline handlers / onclick to handle the event
+                return;
+              }
+            }
+          } catch(e){ /* ignore and continue */ }
+
+          var btn = ev.target.closest && ev.target.closest('button, [data-action], .record-btn');
+          if (!btn) return;
+          var action = btn.getAttribute && (btn.getAttribute('data-action') || '').toLowerCase() || '';
+          var text = (btn.innerText || btn.textContent || '').toLowerCase();
+          var isSave = action.indexOf('record') !== -1 || action.indexOf('save') !== -1 || text.indexOf('บันทึก') !== -1;
+          if (!isSave) return;
+
+          ev.preventDefault && ev.preventDefault();
+          ev.stopImmediatePropagation && ev.stopImmediatePropagation();
+
+          var form = document.getElementById('expenseForm') || document.querySelector('#expenseModal form');
+          var itemId = (document.querySelector('#expenseItemId') && document.querySelector('#expenseItemId').value) || (window.State && State.selectedItem && (State.selectedItem.itemId || State.selectedItem.rowIndex)) || '';
+          var amountRaw = (form && (form.querySelector('#expenseAmount') || form.querySelector('[name="expenseAmount"], [name="amount"]')) && (form.querySelector('#expenseAmount')||form.querySelector('[name="expenseAmount"], [name="amount"]')).value) || '';
+          var amount = parseFloat(String(amountRaw).replace(/[^0-9\.\-]/g,'')) || 0;
+          var desc = (form && (form.querySelector('#expenseDescription')||form.querySelector('[name="description"]')) && (form.querySelector('#expenseDescription')||form.querySelector('[name="description"]')).value) || '';
+          var dateVal = (form && (form.querySelector('#expenseDate')||form.querySelector('[name="expenseDate"]')) && (form.querySelector('#expenseDate')||form.querySelector('[name="expenseDate"]')).value) || '';
+
+          if (typeof window.recordExpense === 'function') {
+            window.recordExpense(itemId, amount, desc, dateVal);
+          } else {
+            console.warn('[hotfix] recordExpense wrapper not available on click proxy');
+          }
+        } catch(e){}
+      }, true);
+      window.__wd_save_click_proxy_installed = true;
+      console.info('[hotfix] save click proxy installed (capture phase)');
+    }
+
+    // install tracer for direct google.script.run.recordExpense calls (optional)
+    try {
+      if (window.google && google.script && google.script.run && !google.script.run._wd_tracer_installed) {
+        var origRun = google.script.run;
+        var proxy = new Proxy(origRun, {
+          get(target, prop) {
+            var orig = target[prop];
+            if (prop === 'recordExpense' && typeof orig === 'function') {
+              return function(){
+                try { console.info('[hotfix-tracer] google.script.run.recordExpense called args:', arguments); } catch(e){}
+                return orig.apply(this, arguments);
+              };
+            }
+            return typeof orig === 'function' ? function(){ return orig.apply(this, arguments); } : orig;
+          }
+        });
+        google.script.run = proxy;
+        google.script.run._wd_tracer_installed = true;
+        console.info('[hotfix] google.script.run.recordExpense tracer installed');
+      }
+    } catch(e){ console.warn('[hotfix] tracer install skipped', e); }
+
+    window.__wd_recordExpense_wrapper_installed = true;
+  } catch(e){ console.error('[hotfix] install failed', e); }
+})();
+</script>

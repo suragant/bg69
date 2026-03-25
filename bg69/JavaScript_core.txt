@@ -1,0 +1,120 @@
+<script nonce="SSR2ii5fRwtNJngHlEUxow">
+'use strict';
+
+document.addEventListener('DOMContentLoaded', function() {
+  const descriptionInput = document.getElementById('expenseDescription');
+  const charCountEl = document.getElementById('expenseDescCharCount');
+
+  if (descriptionInput && charCountEl) {
+    descriptionInput.addEventListener('input', function() {
+      const count = this.value.length;
+      const total = this.maxLength;
+      window.setElementText(charCountEl, `${count} / ${total} เธ•เธฑเธงเธญเธฑเธเธฉเธฃ`);
+    });
+  }
+
+  const expenseForm = document.getElementById('expenseForm');
+
+  if (expenseForm) {
+    expenseForm.addEventListener('submit', function(e) {
+      e.preventDefault();
+
+      const formData = {
+        date: (document.getElementById('expenseDate')?.value || '').trim(),
+        amount: (document.getElementById('expenseAmount')?.value || '').trim(),
+        description: (document.getElementById('expenseDescription')?.value || '').trim()
+      };
+
+      const validation = window.validateExpenseForm(formData);
+
+      if (!validation.valid) {
+        const errorMap = {};
+        if (validation.errors.includes('เธงเธฑเธเธ—เธตเนเธเธณเน€เธเนเธ') ||
+            validation.errors.includes('เธฃเธนเธเนเธเธเธงเธฑเธเธ—เธตเนเนเธกเนเธ–เธนเธเธ•เนเธญเธ') ||
+            validation.errors.includes('เนเธกเนเธชเธฒเธกเธฒเธฃเธ–เธเธฑเธเธ—เธถเธเธงเธฑเธเธ—เธตเนเนเธเธญเธเธฒเธเธ•เนเธ”เน') ||
+            validation.errors.includes('เนเธกเนเธชเธฒเธกเธฒเธฃเธ–เธเธฑเธเธ—เธถเธเน€เธเธดเธเธเนเธฒเธขเน€เธเนเธฒเธเธงเนเธฒ 1 เธเธตเนเธ”เน')) {
+          errorMap['expenseDate'] = validation.errors.find(e =>
+            e.includes('เธงเธฑเธ') || e.includes('เธงเธฑเธเธ—เธตเน')
+          ) || 'เธเนเธญเธกเธนเธฅเธงเธฑเธเธ—เธตเนเนเธกเนเธ–เธนเธเธ•เนเธญเธ';
+        }
+        if (validation.errors.includes('เธเธณเธเธงเธเน€เธเธดเธเธ•เนเธญเธเธกเธฒเธเธเธงเนเธฒ 0') ||
+            validation.errors.includes('เธเธณเธเธงเธเน€เธเธดเธเธกเธฒเธเน€เธเธดเธเนเธ')) {
+          errorMap['expenseAmount'] = validation.errors.find(e =>
+            e.includes('เธเธณเธเธงเธเน€เธเธดเธ')
+          ) || 'เธเนเธญเธกเธนเธฅเธเธณเธเธงเธเน€เธเธดเธเนเธกเนเธ–เธนเธเธ•เนเธญเธ';
+        }
+        if (validation.errors.includes('เธฃเธฒเธขเธฅเธฐเน€เธญเธตเธขเธ”เธ•เนเธญเธเนเธกเนเน€เธเธดเธ 500 เธ•เธฑเธงเธญเธฑเธเธฉเธฃ')) {
+          errorMap['expenseDesc'] = 'เธฃเธฒเธขเธฅเธฐเน€เธญเธตเธขเธ”เธ•เนเธญเธเนเธกเนเน€เธเธดเธ 500 เธ•เธฑเธงเธญเธฑเธเธฉเธฃ';
+        }
+
+        window.displayFormErrors(errorMap);
+        return;
+      }
+
+      window.displayFormErrors({});
+
+      if (typeof submitExpenseForm === 'function') {
+        submitExpenseForm(formData);
+      } else {
+        console.warn('submitExpenseForm function not found');
+        window.showCustomAlert('error', 'เธเนเธญเธเธดเธ”เธเธฅเธฒเธ”', 'เนเธกเนเธชเธฒเธกเธฒเธฃเธ–เธชเนเธเธเนเธญเธกเธนเธฅเนเธ”เน');
+      }
+    });
+  }
+
+  const searchInputs = [
+    'searchItemId',
+    'searchItem',
+    'searchWork',
+    'searchDepartment'
+  ];
+
+  searchInputs.forEach(inputId => {
+    const input = document.getElementById(inputId);
+    if (input) {
+      const debouncedFilter = window.debounce(function() {
+        if (typeof applyFilters === 'function') {
+          applyFilters();
+        }
+      }, 300);
+
+      input.addEventListener('keyup', debouncedFilter);
+      input.addEventListener('change', debouncedFilter);
+    }
+  });
+
+  const filterSelects = ['budgetStatusFilter', 'sortFilter'];
+
+  filterSelects.forEach(selectId => {
+    const select = document.getElementById(selectId);
+    if (select) {
+      select.addEventListener('change', function() {
+        if (typeof applyFilters === 'function') {
+          applyFilters();
+        }
+      });
+    }
+  });
+
+  const resetBtn = document.querySelector('[data-action="reset-filters"]');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function() {
+      searchInputs.forEach(inputId => {
+        const input = document.getElementById(inputId);
+        if (input) input.value = '';
+      });
+
+      const statusFilter = document.getElementById('budgetStatusFilter');
+      const sortFilter = document.getElementById('sortFilter');
+      if (statusFilter) statusFilter.value = 'all';
+      if (sortFilter) sortFilter.value = 'default';
+
+      if (typeof applyFilters === 'function') {
+        applyFilters();
+      }
+    });
+  }
+
+  console.log('Form validation and event listeners initialized');
+});
+</script>

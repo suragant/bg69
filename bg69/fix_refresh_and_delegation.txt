@@ -1,0 +1,261 @@
+<script>
+  /**
+ * fix_refresh_and_delegation.js
+ * - Delegated handlers for Save/History to survive DOM replace (support-mode switches)
+ * - Detect expense save completion and force UI refresh (loadData/renderCards/displayData)
+ * - Rebind when support mode toggles back to main
+ * - Lightweight watchers only: observe modal close and container attribute changes
+ *
+ * Include this file after core/UI and after any enhancement shims.
+ */
+(function(window, document){
+  'use strict';
+  if (!window || !document) return;
+  if (window._wd_fix_refresh_and_delegation_installed) {
+    console.info('[WD-FIX] already installed');
+    return;
+  }
+  window._wd_fix_refresh_and_delegation_installed = true;
+
+  const BUDGET_CONTAINER_SEL = '#budgetContainer';
+  const CONTAINER_SEL = '.container';
+  const EXPENSE_MODAL_ID = 'expenseModal';
+  const WORKDETAIL_MODAL_ID = 'workDetailModal';
+  const DASHBOARD_MODAL_ID = 'dashboardModal';
+  const SUPPORT_FLAG_ATTR = 'data-support-active';
+
+  // Utility: safe call of refresh functions
+  function refreshUI(reason) {
+    try {
+      console.info('[WD-FIX] refreshUI called ->', reason);
+      if (typeof window.loadData === 'function') {
+        try { window.loadData(); console.info('[WD-FIX] called loadData()'); return; } catch(e){ console.warn('[WD-FIX] loadData() failed', e); }
+      }
+      // fallback: try renderCards with state
+      try {
+        if (window.State && Array.isArray(window.State.filteredItems) && typeof window.renderCards === 'function') {
+          window.renderCards(window.State.filteredItems.length ? window.State.filteredItems : window.State.allItems || []);
+          console.info('[WD-FIX] called renderCards() with State');
+          return;
+        }
+      } catch(e){ console.warn('[WD-FIX] renderCards fallback failed', e); }
+      // fallback: call displayData if State contains full payload
+      try {
+        if (typeof window.displayData === 'function' && window.State && Array.isArray(window.State.allItems)) {
+          window.displayData({ success:true, items: window.State.allItems, user: window.State.user || {} });
+          console.info('[WD-FIX] called displayData() fallback');
+          return;
+        }
+      } catch(e){ console.warn('[WD-FIX] displayData fallback failed', e); }
+      console.info('[WD-FIX] no suitable refresh function found (no-op)');
+    } catch(e){ console.error('[WD-FIX] refreshUI error', e); }
+  }
+
+  // Called after a save likely happened (server success or modal closed after save)
+  function onAfterSave() {
+    try {
+      // small delay to allow server-side changes to be visible to client
+      setTimeout(function(){
+        refreshUI('after-save');
+      }, 400);
+    } catch(e){ console.warn('[WD-FIX] onAfterSave error', e); }
+  }
+
+  // Delegation: centralized click handler to survive DOM replaces
+  function installDelegatedActions() {
+    try {
+      if (window._wd_delegated_actions_installed) return;
+      window._wd_delegated_actions_installed = true;
+
+      const root = document.querySelector(BUDGET_CONTAINER_SEL) || document.querySelector(CONTAINER_SEL) || document.body;
+      if (!root) return;
+
+      root.addEventListener('click', function(e){
+        try {
+          const el = e.target.closest && e.target.closest('button, a, [data-action], [data-id], .record-btn');
+          if (!el) return;
+          // skip if inside support container
+          if (window._supportBudgetContainerId) {
+            const sc = document.getElementById(window._supportBudgetContainerId);
+            if (sc && sc.contains(el)) return;
+          }
+
+          const action = (el.getAttribute && (el.getAttribute('data-action') || '')).toLowerCase();
+          const text = (el.innerText || el.textContent || '').toString().trim().toLowerCase();
+
+          // Save / record expense
+          if (action.indexOf('record') !== -1 || action.indexOf('save') !== -1 || text.indexOf('บันทึก') !== -1) {
+            // allow native handlers to run but also ensure our submit flow if handlers missing
+            // detect form inside modal or global
+            const form = el.closest && el.closest('form') || document.getElementById('expenseForm') || document.querySelector('#' + EXPENSE_MODAL_ID + ' form');
+            if (form) {
+              // let existing submit handler run; also attach a one-time listener for success via modal close
+              scheduleModalCloseWatch();
+              return;
+            } else {
+              // fallback: call known save functions if available
+              const fnCandidates = ['saveBudget','recordExpense','saveCurrentDetail','submitBudget','saveWork'];
+              for (const n of fnCandidates) {
+                if (typeof window[n] === 'function') {
+                  try { window[n](el); scheduleModalCloseWatch(); return; } catch(e){ console.warn('[WD-FIX] fallback save fn threw', n, e); }
+                }
+              }
+            }
+            return;
+          }
+
+          // History / open history
+          if (action.indexOf('history') !== -1 || text.indexOf('ประวัติ') !== -1) {
+            try {
+              if (typeof window.openHistory === 'function') { window.openHistory(el.getAttribute && (el.getAttribute('data-id') || el.getAttribute('data-item-id'))); }
+              else if (typeof window.showHistory === 'function') { window.showHistory(); }
+            } catch(e){ console.warn('[WD-FIX] delegated history handler error', e); }
+            return;
+          }
+
+          // Open work detail delegation
+          if (action.indexOf('open-work-detail') !== -1 || text.indexOf('ดูรายละเอียด') !== -1) {
+            const work = el.getAttribute && el.getAttribute('data-work');
+            if (work && typeof window.showWorkExpenseTypes === 'function') {
+              try { window.showWorkExpenseTypes(work); } catch(e){ console.warn('[WD-FIX] delegated open-work-detail error', e); }
+            }
+            return;
+          }
+        } catch(err){ console.warn('[WD-FIX] delegation handler error', err); }
+      }, true);
+
+      console.info('[WD-FIX] delegated actions installed on', root.tagName || 'root');
+    } catch(e){ console.error('[WD-FIX] installDelegatedActions error', e); }
+  }
+
+  // Watch expense modal close to trigger refresh
+  let _expenseModalObserver = null;
+  function scheduleModalCloseWatch() {
+    try {
+      const modal = document.getElementById(EXPENSE_MODAL_ID);
+      if (!modal) {
+        // if modal not present, still call refresh after a small delay (best-effort)
+        onAfterSave();
+        return;
+      }
+      // if already watching, ignore (we'll detect close)
+      if (_expenseModalObserver) return;
+      let lastActive = modal.classList.contains('active') || modal.style.display !== 'none';
+      // immediate attempt: if modal not active, just call onAfterSave
+      if (!lastActive) { onAfterSave(); return; }
+
+      _expenseModalObserver = new MutationObserver(function(muts, obs){
+        try {
+          // if modal lost 'active' class or style display set to none, consider it closed
+          const isActiveNow = modal.classList.contains('active') || modal.style.display !== 'none';
+          if (!isActiveNow) {
+            // modal closed -> trigger refresh and disconnect observer
+            onAfterSave();
+            try { obs.disconnect(); } catch(e){}
+            _expenseModalObserver = null;
+          }
+        } catch(e){}
+      });
+      _expenseModalObserver.observe(modal, { attributes: true, attributeFilter: ['class','style'], childList: false, subtree: false });
+      // also set a safety timeout to disconnect after 8s
+      setTimeout(function(){ try { if (_expenseModalObserver) { _expenseModalObserver.disconnect(); _expenseModalObserver = null; } } catch(e){} }, 8000);
+    } catch(e){ console.warn('[WD-FIX] scheduleModalCloseWatch error', e); onAfterSave(); }
+  }
+
+  // Rebind when support mode toggles back to main
+  let _supportObserver = null;
+  function installSupportModeWatcher() {
+    try {
+      const main = document.querySelector(CONTAINER_SEL) || document.body;
+      if (!main) return;
+      if (_supportObserver) return;
+      _supportObserver = new MutationObserver(function(muts){
+        for (const m of muts) {
+          if (m.type === 'attributes' && (m.attributeName === SUPPORT_FLAG_ATTR || m.attributeName === 'data-support')) {
+            // support attribute changed -> if support turned off, re-run ensureAppReady and bindings
+            const isSupport = main.getAttribute && (main.getAttribute(SUPPORT_FLAG_ATTR) === '1' || main.getAttribute('data-support') === '1' || window._supportMode === true);
+            if (!isSupport) {
+              try {
+                console.info('[WD-FIX] support mode toggled off -> rebind and refresh');
+                if (typeof window.ensureAppReady === 'function') window.ensureAppReady();
+                installDelegatedActions();
+                // small delay then refresh
+                setTimeout(() => refreshUI('support-exit'), 300);
+              } catch(e){ console.warn('[WD-FIX] rebind after support exit failed', e); }
+            }
+          }
+        }
+      });
+      _supportObserver.observe(main, { attributes: true, attributeFilter: [SUPPORT_FLAG_ATTR, 'data-support'] });
+      // also poll window._supportMode in case app toggles global var only
+      let lastSupportState = !!window._supportMode;
+      setInterval(function(){
+        try {
+          const cur = !!window._supportMode;
+          if (cur !== lastSupportState) {
+            lastSupportState = cur;
+            if (!cur) {
+              console.info('[WD-FIX] detected _supportMode changed to false -> rebind and refresh');
+              if (typeof window.ensureAppReady === 'function') window.ensureAppReady();
+              installDelegatedActions();
+              setTimeout(() => refreshUI('support-exit-poll'), 400);
+            }
+          }
+        } catch(e){}
+      }, 1200);
+      console.info('[WD-FIX] support mode watcher installed');
+    } catch(e){ console.warn('[WD-FIX] installSupportModeWatcher error', e); }
+  }
+
+  // Try to detect server success callback for recordExpense by wrapping google.script.run.recordExpense call
+  // This is a non-invasive wrapper: we replace google.script.run.recordExpense with a proxy that calls original and also triggers refresh on success.
+  function installGoogleRunRecordExpenseHook() {
+    try {
+      if (!window.google || !google.script || !google.script.run) return;
+      if (window._wd_recordExpense_hook_installed) return;
+      const origRun = google.script.run;
+      // create a proxy object that mirrors google.script.run but intercepts calls to recordExpense
+      const proxy = new Proxy(origRun, {
+        get(target, prop) {
+          const orig = target[prop];
+          if (prop === 'recordExpense') {
+            return function(...args){
+              // this is unlikely to be directly callable; server stubs usually call google.script.run.recordExpense(...) directly.
+              try {
+                // If developers call with chained handlers like google.script.run.withSuccessHandler(...).recordExpense(...)
+                // we cannot intercept easily here. So we only override simple direct calls.
+                const res = orig.apply(this, args);
+                // best-effort: schedule a refresh after short delay
+                setTimeout(() => onAfterSave(), 500);
+                return res;
+              } catch(e){ return orig.apply(this, args); }
+            };
+          }
+          return typeof orig === 'function' ? function(...a){ return orig.apply(this, a); } : orig;
+        }
+      });
+      // we only set the proxy if origRun exists and is object
+      try { google.script.run = proxy; window._wd_recordExpense_hook_installed = true; console.info('[WD-FIX] google.script.run recordExpense hook installed (best-effort)'); } catch(e){ console.warn('[WD-FIX] could not override google.script.run', e); }
+    } catch(e){ console.warn('[WD-FIX] installGoogleRunRecordExpenseHook error', e); }
+  }
+
+  // Init sequence
+  try {
+    // 1) install delegation to survive remounts
+    installDelegatedActions();
+
+    // 2) attempt lightweight hook to refresh after recordExpense calls
+    installGoogleRunRecordExpenseHook();
+
+    // 3) support-mode watcher for rebind on exit
+    installSupportModeWatcher();
+
+    // 4) expose manual helpers
+    window._wd_onAfterSave = onAfterSave;
+    window._wd_refreshUI = refreshUI;
+    window._wd_installDelegation = installDelegatedActions;
+
+    console.info('[WD-FIX] refresh & delegation patch installed');
+  } catch(e){ console.error('[WD-FIX] install failed', e); }
+})(window, document);
+</script>
